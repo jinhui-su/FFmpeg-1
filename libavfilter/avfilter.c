@@ -295,7 +295,7 @@ int avfilter_config_links(AVFilterContext *filter)
 
             if ((config_link = link->dstpad->config_props))
                 if ((ret = config_link(link)) < 0) {
-                    av_log(link->src, AV_LOG_ERROR,
+                    av_log(link->dst, AV_LOG_ERROR,
                            "Failed to configure input pad on %s\n",
                            link->dst->name);
                     return ret;
@@ -456,6 +456,7 @@ int avfilter_process_command(AVFilterContext *filter, const char *cmd, const cha
 }
 
 static AVFilter *first_filter;
+static AVFilter **last_filter = &first_filter;
 
 #if !FF_API_NOCONST_GET_NAME
 const
@@ -476,7 +477,7 @@ AVFilter *avfilter_get_by_name(const char *name)
 
 int avfilter_register(AVFilter *filter)
 {
-    AVFilter **f = &first_filter;
+    AVFilter **f = last_filter;
     int i;
 
     /* the filter must select generic or internal exclusively */
@@ -490,8 +491,9 @@ int avfilter_register(AVFilter *filter)
 
     filter->next = NULL;
 
-    while(avpriv_atomic_ptr_cas((void * volatile *)f, NULL, filter))
+    while(*f || avpriv_atomic_ptr_cas((void * volatile *)f, NULL, filter))
         f = &(*f)->next;
+    last_filter = &filter->next;
 
     return 0;
 }
@@ -625,22 +627,22 @@ AVFilterContext *ff_filter_alloc(const AVFilter *filter, const char *inst_name)
 
     ret->nb_inputs = avfilter_pad_count(filter->inputs);
     if (ret->nb_inputs ) {
-        ret->input_pads   = av_malloc(sizeof(AVFilterPad) * ret->nb_inputs);
+        ret->input_pads   = av_malloc_array(ret->nb_inputs, sizeof(AVFilterPad));
         if (!ret->input_pads)
             goto err;
         memcpy(ret->input_pads, filter->inputs, sizeof(AVFilterPad) * ret->nb_inputs);
-        ret->inputs       = av_mallocz(sizeof(AVFilterLink*) * ret->nb_inputs);
+        ret->inputs       = av_mallocz_array(ret->nb_inputs, sizeof(AVFilterLink*));
         if (!ret->inputs)
             goto err;
     }
 
     ret->nb_outputs = avfilter_pad_count(filter->outputs);
     if (ret->nb_outputs) {
-        ret->output_pads  = av_malloc(sizeof(AVFilterPad) * ret->nb_outputs);
+        ret->output_pads  = av_malloc_array(ret->nb_outputs, sizeof(AVFilterPad));
         if (!ret->output_pads)
             goto err;
         memcpy(ret->output_pads, filter->outputs, sizeof(AVFilterPad) * ret->nb_outputs);
-        ret->outputs      = av_mallocz(sizeof(AVFilterLink*) * ret->nb_outputs);
+        ret->outputs      = av_mallocz_array(ret->nb_outputs, sizeof(AVFilterLink*));
         if (!ret->outputs)
             goto err;
     }
@@ -997,7 +999,7 @@ static int ff_filter_frame_framed(AVFilterLink *link, AVFrame *frame)
     int (*filter_frame)(AVFilterLink *, AVFrame *);
     AVFilterContext *dstctx = link->dst;
     AVFilterPad *dst = link->dstpad;
-    AVFrame *out;
+    AVFrame *out = NULL;
     int ret;
     AVFilterCommand *cmd= link->dst->command_queue;
     int64_t pts;
@@ -1022,13 +1024,18 @@ static int ff_filter_frame_framed(AVFilterLink *link, AVFrame *frame)
         case AVMEDIA_TYPE_AUDIO:
             out = ff_get_audio_buffer(link, frame->nb_samples);
             break;
-        default: return AVERROR(EINVAL);
+        default:
+            ret = AVERROR(EINVAL);
+            goto fail;
         }
         if (!out) {
-            av_frame_free(&frame);
-            return AVERROR(ENOMEM);
+            ret = AVERROR(ENOMEM);
+            goto fail;
         }
-        av_frame_copy_props(out, frame);
+
+        ret = av_frame_copy_props(out, frame);
+        if (ret < 0)
+            goto fail;
 
         switch (link->type) {
         case AVMEDIA_TYPE_VIDEO:
@@ -1041,7 +1048,9 @@ static int ff_filter_frame_framed(AVFilterLink *link, AVFrame *frame)
                             av_get_channel_layout_nb_channels(frame->channel_layout),
                             frame->format);
             break;
-        default: return AVERROR(EINVAL);
+        default:
+            ret = AVERROR(EINVAL);
+            goto fail;
         }
 
         av_frame_free(&frame);
@@ -1073,6 +1082,11 @@ static int ff_filter_frame_framed(AVFilterLink *link, AVFrame *frame)
     link->frame_count++;
     link->frame_requested = 0;
     ff_update_link_current_pts(link, pts);
+    return ret;
+
+fail:
+    av_frame_free(&out);
+    av_frame_free(&frame);
     return ret;
 }
 

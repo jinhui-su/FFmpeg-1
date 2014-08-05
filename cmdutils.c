@@ -20,6 +20,7 @@
  */
 
 #include <string.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <math.h>
@@ -48,8 +49,8 @@
 #include "libavutil/dict.h"
 #include "libavutil/opt.h"
 #include "libavutil/cpu.h"
+#include "libavutil/ffversion.h"
 #include "cmdutils.h"
-#include "version.h"
 #if CONFIG_NETWORK
 #include "libavformat/network.h"
 #endif
@@ -57,10 +58,6 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #endif
-#if CONFIG_OPENCL
-#include "libavutil/opencl.h"
-#endif
-
 
 static int init_report(const char *env);
 
@@ -68,9 +65,9 @@ struct SwsContext *sws_opts;
 AVDictionary *swr_opts;
 AVDictionary *format_opts, *codec_opts, *resample_opts;
 
-const int this_year = 2013;
-
 static FILE *report_file;
+static int report_file_level = AV_LOG_DEBUG;
+int hide_banner = 0;
 
 void init_opts(void)
 {
@@ -108,8 +105,10 @@ static void log_callback_report(void *ptr, int level, const char *fmt, va_list v
     av_log_default_callback(ptr, level, fmt, vl);
     av_log_format_line(ptr, level, fmt, vl2, line, sizeof(line), &print_prefix);
     va_end(vl2);
-    fputs(line, report_file);
-    fflush(report_file);
+    if (report_file_level >= level) {
+        fputs(line, report_file);
+        fflush(report_file);
+    }
 }
 
 static void (*program_exit)(int ret);
@@ -496,6 +495,9 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
             fflush(report_file);
         }
     }
+    idx = locate_option(argc, argv, options, "hide_banner");
+    if (idx)
+        hide_banner = 1;
 }
 
 static const AVOption *opt_find(void *obj, const char *name, const char *unit,
@@ -551,6 +553,11 @@ int opt_default(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_ERROR, "Error setting option %s.\n", opt);
             return ret;
         }
+        consumed = 1;
+    }
+#else
+    if (!consumed && !strcmp(opt, "sws_flags")) {
+        av_log(NULL, AV_LOG_WARNING, "Ignoring %s %s, due to disabled swscale\n", opt, arg);
         consumed = 1;
     }
 #endif
@@ -663,7 +670,7 @@ static void init_parse_context(OptionParseContext *octx,
     memset(octx, 0, sizeof(*octx));
 
     octx->nb_groups = nb_groups;
-    octx->groups    = av_mallocz(sizeof(*octx->groups) * octx->nb_groups);
+    octx->groups    = av_mallocz_array(octx->nb_groups, sizeof(*octx->groups));
     if (!octx->groups)
         exit_program(1);
 
@@ -835,10 +842,17 @@ int opt_loglevel(void *optctx, const char *opt, const char *arg)
     };
     char *tail;
     int level;
+    int flags;
     int i;
 
+    flags = av_log_get_flags();
     tail = strstr(arg, "repeat");
-    av_log_set_flags(tail ? 0 : AV_LOG_SKIP_REPEATED);
+    if (tail)
+        flags &= ~AV_LOG_SKIP_REPEATED;
+    else
+        flags |= AV_LOG_SKIP_REPEATED;
+
+    av_log_set_flags(flags);
     if (tail == arg)
         arg += 6 + (arg[6]=='+');
     if(tail && !*arg)
@@ -920,6 +934,13 @@ static int init_report(const char *env)
             av_free(filename_template);
             filename_template = val;
             val = NULL;
+        } else if (!strcmp(key, "level")) {
+            char *tail;
+            report_file_level = strtol(val, &tail, 10);
+            if (*tail) {
+                av_log(NULL, AV_LOG_FATAL, "Invalid report file level\n");
+                exit_program(1);
+            }
         } else {
             av_log(NULL, AV_LOG_ERROR, "Unknown key '%s' in FFREPORT\n", key);
         }
@@ -986,26 +1007,6 @@ int opt_timelimit(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-#if CONFIG_OPENCL
-int opt_opencl(void *optctx, const char *opt, const char *arg)
-{
-    char *key, *value;
-    const char *opts = arg;
-    int ret = 0;
-    while (*opts) {
-        ret = av_opt_get_key_value(&opts, "=", ":", 0, &key, &value);
-        if (ret < 0)
-            return ret;
-        ret = av_opencl_set_option(key, value);
-        if (ret < 0)
-            return ret;
-        if (*opts)
-            opts++;
-    }
-    return ret;
-}
-#endif
-
 void print_error(const char *filename, int err)
 {
     char errbuf[128];
@@ -1071,7 +1072,7 @@ static void print_program_info(int flags, int level)
     av_log(NULL, level, "%s version " FFMPEG_VERSION, program_name);
     if (flags & SHOW_COPYRIGHT)
         av_log(NULL, level, " Copyright (c) %d-%d the FFmpeg developers",
-               program_birth_year, this_year);
+               program_birth_year, CONFIG_THIS_YEAR);
     av_log(NULL, level, "\n");
     av_log(NULL, level, "%sbuilt on %s %s with %s\n",
            indent, __DATE__, __TIME__, CC_IDENT);
@@ -1079,10 +1080,36 @@ static void print_program_info(int flags, int level)
     av_log(NULL, level, "%sconfiguration: " FFMPEG_CONFIGURATION "\n", indent);
 }
 
+static void print_buildconf(int flags, int level)
+{
+    const char *indent = flags & INDENT ? "  " : "";
+    char str[] = { FFMPEG_CONFIGURATION };
+    char *conflist, *remove_tilde, *splitconf;
+
+    // Change all the ' --' strings to '~--' so that
+    // they can be identified as tokens.
+    while ((conflist = strstr(str, " --")) != NULL) {
+        strncpy(conflist, "~--", 3);
+    }
+
+    // Compensate for the weirdness this would cause
+    // when passing 'pkg-config --static'.
+    while ((remove_tilde = strstr(str, "pkg-config~")) != NULL) {
+        strncpy(remove_tilde, "pkg-config ", 11);
+    }
+
+    splitconf = strtok(str, "~");
+    av_log(NULL, level, "\n%sconfiguration:\n", indent);
+    while (splitconf != NULL) {
+        av_log(NULL, level, "%s%s%s\n", indent, indent, splitconf);
+        splitconf = strtok(NULL, "~");
+    }
+}
+
 void show_banner(int argc, char **argv, const OptionDef *options)
 {
     int idx = locate_option(argc, argv, options, "version");
-    if (idx)
+    if (hide_banner || idx)
         return;
 
     print_program_info (INDENT|SHOW_COPYRIGHT, AV_LOG_INFO);
@@ -1093,8 +1120,16 @@ void show_banner(int argc, char **argv, const OptionDef *options)
 int show_version(void *optctx, const char *opt, const char *arg)
 {
     av_log_set_callback(log_callback_help);
-    print_program_info (0           , AV_LOG_INFO);
+    print_program_info (SHOW_COPYRIGHT, AV_LOG_INFO);
     print_all_libs_info(SHOW_VERSION, AV_LOG_INFO);
+
+    return 0;
+}
+
+int show_buildconf(void *optctx, const char *opt, const char *arg)
+{
+    av_log_set_callback(log_callback_help);
+    print_buildconf      (INDENT|0, AV_LOG_INFO);
 
     return 0;
 }
@@ -1173,16 +1208,29 @@ int show_license(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_formats(void *optctx, const char *opt, const char *arg)
+static int is_device(const AVClass *avclass)
+{
+    if (!avclass)
+        return 0;
+    return avclass->category == AV_CLASS_CATEGORY_DEVICE_VIDEO_OUTPUT ||
+           avclass->category == AV_CLASS_CATEGORY_DEVICE_VIDEO_INPUT ||
+           avclass->category == AV_CLASS_CATEGORY_DEVICE_AUDIO_OUTPUT ||
+           avclass->category == AV_CLASS_CATEGORY_DEVICE_AUDIO_INPUT ||
+           avclass->category == AV_CLASS_CATEGORY_DEVICE_OUTPUT ||
+           avclass->category == AV_CLASS_CATEGORY_DEVICE_INPUT;
+}
+
+static int show_formats_devices(void *optctx, const char *opt, const char *arg, int device_only)
 {
     AVInputFormat *ifmt  = NULL;
     AVOutputFormat *ofmt = NULL;
     const char *last_name;
+    int is_dev;
 
-    printf("File formats:\n"
+    printf("%s\n"
            " D. = Demuxing supported\n"
            " .E = Muxing supported\n"
-           " --\n");
+           " --\n", device_only ? "Devices:" : "File formats:");
     last_name = "000";
     for (;;) {
         int decode = 0;
@@ -1191,6 +1239,9 @@ int show_formats(void *optctx, const char *opt, const char *arg)
         const char *long_name = NULL;
 
         while ((ofmt = av_oformat_next(ofmt))) {
+            is_dev = is_device(ofmt->priv_class);
+            if (!is_dev && device_only)
+                continue;
             if ((name == NULL || strcmp(ofmt->name, name) < 0) &&
                 strcmp(ofmt->name, last_name) > 0) {
                 name      = ofmt->name;
@@ -1199,6 +1250,9 @@ int show_formats(void *optctx, const char *opt, const char *arg)
             }
         }
         while ((ifmt = av_iformat_next(ifmt))) {
+            is_dev = is_device(ifmt->priv_class);
+            if (!is_dev && device_only)
+                continue;
             if ((name == NULL || strcmp(ifmt->name, name) < 0) &&
                 strcmp(ifmt->name, last_name) > 0) {
                 name      = ifmt->name;
@@ -1219,6 +1273,16 @@ int show_formats(void *optctx, const char *opt, const char *arg)
             long_name ? long_name:" ");
     }
     return 0;
+}
+
+int show_formats(void *optctx, const char *opt, const char *arg)
+{
+    return show_formats_devices(optctx, opt, arg, 0);
+}
+
+int show_devices(void *optctx, const char *opt, const char *arg)
+{
+    return show_formats_devices(optctx, opt, arg, 1);
 }
 
 #define PRINT_CODEC_SUPPORTED(codec, field, type, list_name, term, get_name) \
@@ -1364,6 +1428,9 @@ int show_codecs(void *optctx, const char *opt, const char *arg)
     for (i = 0; i < nb_codecs; i++) {
         const AVCodecDescriptor *desc = codecs[i];
         const AVCodec *codec = NULL;
+
+        if (strstr(desc->name, "_deprecated"))
+            continue;
 
         printf(" ");
         printf(avcodec_find_decoder(desc->id) ? "D" : ".");
@@ -1791,7 +1858,7 @@ int read_yesno(void)
 int cmdutils_read_file(const char *filename, char **bufptr, size_t *size)
 {
     int ret;
-    FILE *f = fopen(filename, "rb");
+    FILE *f = av_fopen_utf8(filename, "rb");
 
     if (!f) {
         av_log(NULL, AV_LOG_ERROR, "Cannot read file '%s': %s\n", filename,
@@ -1929,7 +1996,8 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
             }
 
         if (av_opt_find(&cc, t->key, NULL, flags, AV_OPT_SEARCH_FAKE_OBJ) ||
-            (codec && codec->priv_class &&
+            !codec ||
+            (codec->priv_class &&
              av_opt_find(&codec->priv_class, t->key, NULL, flags,
                          AV_OPT_SEARCH_FAKE_OBJ)))
             av_dict_set(&ret, t->key, t->value, 0);
@@ -1952,7 +2020,7 @@ AVDictionary **setup_find_stream_info_opts(AVFormatContext *s,
 
     if (!s->nb_streams)
         return NULL;
-    opts = av_mallocz(s->nb_streams * sizeof(*opts));
+    opts = av_mallocz_array(s->nb_streams, sizeof(*opts));
     if (!opts) {
         av_log(NULL, AV_LOG_ERROR,
                "Could not alloc memory for stream options.\n");

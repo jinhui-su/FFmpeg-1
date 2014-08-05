@@ -36,6 +36,11 @@ int avresample_open(AVAudioResampleContext *avr)
 {
     int ret;
 
+    if (avresample_is_open(avr)) {
+        av_log(avr, AV_LOG_ERROR, "The resampling context is already open.\n");
+        return AVERROR(EINVAL);
+    }
+
     /* set channel mixing parameters */
     avr->in_channels = av_get_channel_layout_nb_channels(avr->in_channel_layout);
     if (avr->in_channels <= 0 || avr->in_channels > AVRESAMPLE_MAX_CHANNELS) {
@@ -96,16 +101,10 @@ int avresample_open(AVAudioResampleContext *avr)
                av_get_sample_fmt_name(avr->internal_sample_fmt));
     }
 
-    /* treat all mono as planar for easier comparison */
-    if (avr->in_channels == 1)
-        avr->in_sample_fmt = av_get_planar_sample_fmt(avr->in_sample_fmt);
-    if (avr->out_channels == 1)
-        avr->out_sample_fmt = av_get_planar_sample_fmt(avr->out_sample_fmt);
-
     /* we may need to add an extra conversion in order to remap channels if
        the output format is not planar */
     if (avr->use_channel_map && !avr->mixing_needed && !avr->resample_needed &&
-        !av_sample_fmt_is_planar(avr->out_sample_fmt)) {
+        !ff_sample_fmt_is_planar(avr->out_sample_fmt, avr->out_channels)) {
         avr->internal_sample_fmt = av_get_planar_sample_fmt(avr->out_sample_fmt);
     }
 
@@ -114,7 +113,7 @@ int avresample_open(AVAudioResampleContext *avr)
         avr->in_convert_needed = avr->in_sample_fmt != avr->internal_sample_fmt;
     else
         avr->in_convert_needed = avr->use_channel_map &&
-                                 !av_sample_fmt_is_planar(avr->out_sample_fmt);
+                                 !ff_sample_fmt_is_planar(avr->out_sample_fmt, avr->out_channels);
 
     if (avr->resample_needed || avr->mixing_needed || avr->in_convert_needed)
         avr->out_convert_needed = avr->internal_sample_fmt != avr->out_sample_fmt;
@@ -184,7 +183,7 @@ int avresample_open(AVAudioResampleContext *avr)
     }
     if (avr->resample_needed) {
         avr->resample_out_buffer = ff_audio_data_alloc(avr->out_channels,
-                                                       0, avr->internal_sample_fmt,
+                                                       1024, avr->internal_sample_fmt,
                                                        "resample_out_buffer");
         if (!avr->resample_out_buffer) {
             ret = AVERROR(EINVAL);
@@ -252,6 +251,11 @@ int avresample_open(AVAudioResampleContext *avr)
 error:
     avresample_close(avr);
     return ret;
+}
+
+int avresample_is_open(AVAudioResampleContext *avr)
+{
+    return !!avr->out_fifo;
 }
 
 void avresample_close(AVAudioResampleContext *avr)
@@ -610,6 +614,25 @@ int avresample_set_channel_mapping(AVAudioResampleContext *avr,
 int avresample_available(AVAudioResampleContext *avr)
 {
     return av_audio_fifo_size(avr->out_fifo);
+}
+
+int avresample_get_out_samples(AVAudioResampleContext *avr, int in_nb_samples)
+{
+    int64_t samples = avresample_get_delay(avr) + (int64_t)in_nb_samples;
+
+    if (avr->resample_needed) {
+        samples = av_rescale_rnd(samples,
+                                 avr->out_sample_rate,
+                                 avr->in_sample_rate,
+                                 AV_ROUND_UP);
+    }
+
+    samples += avresample_available(avr);
+
+    if (samples > INT_MAX)
+        return AVERROR(EINVAL);
+
+    return samples;
 }
 
 int avresample_read(AVAudioResampleContext *avr, uint8_t **output, int nb_samples)

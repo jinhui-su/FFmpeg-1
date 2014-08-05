@@ -26,7 +26,6 @@
  */
 
 #include <xvid.h>
-#include <unistd.h>
 #include "avcodec.h"
 #include "internal.h"
 #include "libavutil/file.h"
@@ -35,6 +34,14 @@
 #include "libavutil/mathematics.h"
 #include "libxvid.h"
 #include "mpegvideo.h"
+
+#if HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
+#if HAVE_IO_H
+#include <io.h>
+#endif
 
 /**
  * Buffer management macros.
@@ -48,6 +55,7 @@
  * This stores all the private context for the codec.
  */
 struct xvid_context {
+    AVClass *class;
     void *encoder_handle;          /**< Handle for Xvid encoder */
     int xsize;                     /**< Frame x size */
     int ysize;                     /**< Frame y size */
@@ -56,7 +64,6 @@ struct xvid_context {
     int me_flags;                  /**< Motion Estimation flags */
     int qscale;                    /**< Do we use constant scale? */
     int quicktime_format;          /**< Are we in a QT-based format? */
-    AVFrame encoded_picture;       /**< Encoded frame information */
     char *twopassbuffer;           /**< Character buffer for two-pass */
     char *old_twopassbuffer;       /**< Old character buffer (two-pass) */
     char *twopassfile;             /**< second pass temp file name */
@@ -67,6 +74,7 @@ struct xvid_context {
     int variance_aq;               /**< Variance adaptive quantization */
     int ssim;                      /**< SSIM information display mode */
     int ssim_acc;                  /**< SSIM accuracy. 0: accurate. 4: fast. */
+    int gmc;
 };
 
 /**
@@ -422,8 +430,13 @@ static av_cold int xvid_encode_init(AVCodecContext *avctx)  {
     }
 
     /* Bring in VOL flags from ffmpeg command-line */
+#if FF_API_GMC
+    if (avctx->flags & CODEC_FLAG_GMC)
+        x->gmc = 1;
+#endif
+
     x->vol_flags = 0;
-    if( xvid_flags & CODEC_FLAG_GMC ) {
+    if (x->gmc) {
         x->vol_flags    |= XVID_VOL_GMC;
         x->me_flags     |= XVID_ME_GME_REFINE;
     }
@@ -436,19 +449,7 @@ static av_cold int xvid_encode_init(AVCodecContext *avctx)  {
 
     xvid_gbl_init.version = XVID_VERSION;
     xvid_gbl_init.debug = 0;
-
-#if ARCH_PPC
-    /* Xvid's PPC support is borked, use libavcodec to detect */
-#if HAVE_ALTIVEC
-    if (av_get_cpu_flags() & AV_CPU_FLAG_ALTIVEC) {
-        xvid_gbl_init.cpu_flags = XVID_CPU_FORCE | XVID_CPU_ALTIVEC;
-    } else
-#endif
-        xvid_gbl_init.cpu_flags = XVID_CPU_FORCE;
-#else
-    /* Xvid can detect on x86 */
     xvid_gbl_init.cpu_flags = 0;
-#endif
 
     /* Initialize */
     xvid_global(NULL, XVID_GBL_INIT, &xvid_gbl_init, NULL);
@@ -531,25 +532,26 @@ static av_cold int xvid_encode_init(AVCodecContext *avctx)  {
         xvid_enc_create.num_plugins++;
     }
 
-    if ( avctx->lumi_masking != 0.0)
+    if (avctx->lumi_masking != 0.0)
         x->lumi_aq = 1;
 
     /* Luminance Masking */
-    if( x->lumi_aq ) {
+    if (x->lumi_aq) {
         masking_l.method = 0;
         plugins[xvid_enc_create.num_plugins].func = xvid_plugin_lumimasking;
 
         /* The old behavior is that when avctx->lumi_masking is specified,
          * plugins[...].param = NULL. Trying to keep the old behavior here. */
-        plugins[xvid_enc_create.num_plugins].param = avctx->lumi_masking ? NULL : &masking_l ;
-        xvid_enc_create.num_plugins++;
+        plugins[xvid_enc_create.num_plugins].param = avctx->lumi_masking ? NULL
+                                                                         : &masking_l;
+                xvid_enc_create.num_plugins++;
     }
 
     /* Variance AQ */
-    if( x->variance_aq ) {
+    if (x->variance_aq) {
         masking_v.method = 1;
         plugins[xvid_enc_create.num_plugins].func  = xvid_plugin_lumimasking;
-        plugins[xvid_enc_create.num_plugins].param = &masking_v ;
+        plugins[xvid_enc_create.num_plugins].param = &masking_v;
         xvid_enc_create.num_plugins++;
     }
 
@@ -559,9 +561,9 @@ static av_cold int xvid_encode_init(AVCodecContext *avctx)  {
                "will be the worse one of the two effects made by the AQ.\n");
 
     /* SSIM */
-    if( x->ssim ) {
+    if (x->ssim) {
         plugins[xvid_enc_create.num_plugins].func = xvid_plugin_ssim;
-        ssim.b_printstat = ( x->ssim == 2 );
+        ssim.b_printstat = x->ssim == 2;
         ssim.acc         = x->ssim_acc;
         ssim.cpu_flags   = xvid_gbl_init.cpu_flags;
         ssim.b_visualize = 0;
@@ -651,7 +653,9 @@ static av_cold int xvid_encode_init(AVCodecContext *avctx)  {
     }
 
     x->encoder_handle = xvid_enc_create.handle;
-    avctx->coded_frame = &x->encoded_picture;
+    avctx->coded_frame = av_frame_alloc();
+    if (!avctx->coded_frame)
+        return AVERROR(ENOMEM);
 
     return 0;
 fail:
@@ -665,7 +669,7 @@ static int xvid_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     int xerr, i, ret, user_packet = !!pkt->data;
     char *tmp;
     struct xvid_context *x = avctx->priv_data;
-    AVFrame *p = &x->encoded_picture;
+    AVFrame *p = avctx->coded_frame;
     int mb_width   = (avctx->width  + 15) / 16;
     int mb_height  = (avctx->height + 15) / 16;
 
@@ -678,7 +682,6 @@ static int xvid_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     /* Start setting up the frame */
     xvid_enc_frame.version = XVID_VERSION;
     xvid_enc_stats.version = XVID_VERSION;
-    *p = *picture;
 
     /* Let Xvid know where to put the frame. */
     xvid_enc_frame.bitstream = pkt->data;
@@ -687,7 +690,7 @@ static int xvid_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     /* Initialize input image fields */
     if( avctx->pix_fmt != AV_PIX_FMT_YUV420P ) {
         av_log(avctx, AV_LOG_ERROR, "Xvid: Color spaces other than 420p not supported\n");
-        return -1;
+        return AVERROR(EINVAL);
     }
 
     xvid_enc_frame.input.csp = XVID_CSP_PLANAR; /* YUV420P */
@@ -774,7 +777,7 @@ static int xvid_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         if (!xerr)
             return 0;
         av_log(avctx, AV_LOG_ERROR, "Xvid: Encoding Error Occurred: %i\n", xerr);
-        return -1;
+        return AVERROR_EXTERNAL;
     }
 }
 
@@ -813,6 +816,7 @@ static const AVOption options[] = {
         { "avg",     NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "ssim" },
         { "frame",   NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, INT_MIN, INT_MAX, VE, "ssim" },
     { "ssim_acc",    "SSIM accuracy",                         OFFSET(ssim_acc),          AV_OPT_TYPE_INT, { .i64 = 2 }, 0, 4, VE },
+    { "gmc",         "use GMC",              OFFSET(gmc),         AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VE },
     { NULL },
 };
 

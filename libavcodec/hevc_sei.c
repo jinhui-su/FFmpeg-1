@@ -22,11 +22,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "hevc.h"
 #include "golomb.h"
+#include "hevc.h"
 
-static void decode_nal_sei_decoded_picture_hash(HEVCContext *s,
-                                                int payload_size)
+static void decode_nal_sei_decoded_picture_hash(HEVCContext *s)
 {
     int cIdx, i;
     uint8_t hash_type;
@@ -44,7 +43,7 @@ static void decode_nal_sei_decoded_picture_hash(HEVCContext *s,
             // picture_crc = get_bits(gb, 16);
             skip_bits(gb, 16);
         } else if (hash_type == 2) {
-            // picture_checksum = get_bits(gb, 32);
+            // picture_checksum = get_bits_long(gb, 32);
             skip_bits(gb, 32);
         }
     }
@@ -53,26 +52,41 @@ static void decode_nal_sei_decoded_picture_hash(HEVCContext *s,
 static void decode_nal_sei_frame_packing_arrangement(HEVCContext *s)
 {
     GetBitContext *gb = &s->HEVClc->gb;
-    int cancel, type, quincunx;
 
     get_ue_golomb(gb);                  // frame_packing_arrangement_id
-    cancel = get_bits1(gb);             // frame_packing_cancel_flag
-    if (cancel == 0) {
-        type     = get_bits(gb, 7);     // frame_packing_arrangement_type
-        quincunx = get_bits1(gb);       // quincunx_sampling_flag
-        skip_bits(gb, 6);               // content_interpretation_type
+    s->sei_frame_packing_present = !get_bits1(gb);
+
+    if (s->sei_frame_packing_present) {
+        s->frame_packing_arrangement_type = get_bits(gb, 7);
+        s->quincunx_subsampling           = get_bits1(gb);
+        s->content_interpretation_type    = get_bits(gb, 6);
 
         // the following skips spatial_flipping_flag frame0_flipped_flag
         // field_views_flag current_frame_is_frame0_flag
         // frame0_self_contained_flag frame1_self_contained_flag
         skip_bits(gb, 6);
 
-        if (quincunx == 0 && type != 5)
+        if (!s->quincunx_subsampling && s->frame_packing_arrangement_type != 5)
             skip_bits(gb, 16);  // frame[01]_grid_position_[xy]
         skip_bits(gb, 8);       // frame_packing_arrangement_reserved_byte
         skip_bits1(gb);         // frame_packing_arrangement_persistance_flag
     }
     skip_bits1(gb);             // upsampled_aspect_ratio_flag
+}
+
+static void decode_nal_sei_display_orientation(HEVCContext *s)
+{
+    GetBitContext *gb = &s->HEVClc->gb;
+
+    s->sei_display_orientation_present = !get_bits1(gb);
+
+    if (s->sei_display_orientation_present) {
+        s->sei_hflip = get_bits1(gb);     // hor_flip
+        s->sei_vflip = get_bits1(gb);     // ver_flip
+
+        s->sei_anticlockwise_rotation = get_bits(gb, 16);
+        skip_bits1(gb);     // display_orientation_persistence_flag
+    }
 }
 
 static int decode_pic_timing(HEVCContext *s)
@@ -145,11 +159,11 @@ static int decode_nal_sei_message(HEVCContext *s)
     }
     if (s->nal_unit_type == NAL_SEI_PREFIX) {
         if (payload_type == 256 /*&& s->decode_checksum_sei*/) {
-            decode_nal_sei_decoded_picture_hash(s, payload_size);
-            return 1;
+            decode_nal_sei_decoded_picture_hash(s);
         } else if (payload_type == 45) {
             decode_nal_sei_frame_packing_arrangement(s);
-            return 1;
+        } else if (payload_type == 47) {
+            decode_nal_sei_display_orientation(s);
         } else if (payload_type == 1){
             int ret = decode_pic_timing(s);
             av_log(s->avctx, AV_LOG_DEBUG, "Skipped PREFIX SEI %d\n", payload_type);
@@ -158,21 +172,19 @@ static int decode_nal_sei_message(HEVCContext *s)
         } else if (payload_type == 129){
             active_parameter_sets(s);
             av_log(s->avctx, AV_LOG_DEBUG, "Skipped PREFIX SEI %d\n", payload_type);
-            return 1;
         } else {
             av_log(s->avctx, AV_LOG_DEBUG, "Skipped PREFIX SEI %d\n", payload_type);
             skip_bits(gb, 8*payload_size);
-            return 1;
         }
     } else { /* nal_unit_type == NAL_SEI_SUFFIX */
         if (payload_type == 132 /* && s->decode_checksum_sei */)
-            decode_nal_sei_decoded_picture_hash(s, payload_size);
+            decode_nal_sei_decoded_picture_hash(s);
         else {
             av_log(s->avctx, AV_LOG_DEBUG, "Skipped SUFFIX SEI %d\n", payload_type);
             skip_bits(gb, 8 * payload_size);
         }
-        return 1;
     }
+    return 1;
 }
 
 static int more_rbsp_data(GetBitContext *gb)

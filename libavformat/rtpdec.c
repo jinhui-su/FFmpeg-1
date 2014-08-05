@@ -32,6 +32,12 @@
 
 #define MIN_FEEDBACK_INTERVAL 200000 /* 200 ms in us */
 
+static RTPDynamicProtocolHandler gsm_dynamic_handler = {
+    .enc_name   = "GSM",
+    .codec_type = AVMEDIA_TYPE_AUDIO,
+    .codec_id   = AV_CODEC_ID_GSM,
+};
+
 static RTPDynamicProtocolHandler realmedia_mp3_dynamic_handler = {
     .enc_name   = "X-MP3-draft-00",
     .codec_type = AVMEDIA_TYPE_AUDIO,
@@ -90,6 +96,7 @@ void ff_register_rtp_dynamic_payload_handlers(void)
     ff_register_dynamic_payload_handler(&ff_theora_dynamic_handler);
     ff_register_dynamic_payload_handler(&ff_vorbis_dynamic_handler);
     ff_register_dynamic_payload_handler(&ff_vp8_dynamic_handler);
+    ff_register_dynamic_payload_handler(&gsm_dynamic_handler);
     ff_register_dynamic_payload_handler(&opus_dynamic_handler);
     ff_register_dynamic_payload_handler(&realmedia_mp3_dynamic_handler);
     ff_register_dynamic_payload_handler(&speex_dynamic_handler);
@@ -826,8 +833,10 @@ void ff_rtp_parse_close(RTPDemuxContext *s)
     av_free(s);
 }
 
-int ff_parse_fmtp(AVStream *stream, PayloadContext *data, const char *p,
-                  int (*parse_fmtp)(AVStream *stream,
+int ff_parse_fmtp(AVFormatContext *s,
+                  AVStream *stream, PayloadContext *data, const char *p,
+                  int (*parse_fmtp)(AVFormatContext *s,
+                                    AVStream *stream,
                                     PayloadContext *data,
                                     char *attr, char *value))
 {
@@ -852,7 +861,7 @@ int ff_parse_fmtp(AVStream *stream, PayloadContext *data, const char *p,
     while (ff_rtsp_next_attr_and_value(&p,
                                        attr, sizeof(attr),
                                        value, value_size)) {
-        res = parse_fmtp(stream, data, attr, value);
+        res = parse_fmtp(s, stream, data, attr, value);
         if (res < 0 && res != AVERROR_PATCHWELCOME) {
             av_free(value);
             return res;

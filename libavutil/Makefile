@@ -19,11 +19,14 @@ HEADERS = adler32.h                                                     \
           common.h                                                      \
           cpu.h                                                         \
           crc.h                                                         \
+          display.h                                                     \
+          downmix_info.h                                                \
           error.h                                                       \
           eval.h                                                        \
           fifo.h                                                        \
           file.h                                                        \
           frame.h                                                       \
+          hash.h                                                        \
           hmac.h                                                        \
           imgutils.h                                                    \
           intfloat.h                                                    \
@@ -31,6 +34,7 @@ HEADERS = adler32.h                                                     \
           intreadwrite.h                                                \
           lfg.h                                                         \
           log.h                                                         \
+          macros.h                                                      \
           mathematics.h                                                 \
           md5.h                                                         \
           mem.h                                                         \
@@ -42,11 +46,14 @@ HEADERS = adler32.h                                                     \
           pixdesc.h                                                     \
           pixfmt.h                                                      \
           random_seed.h                                                 \
+          replaygain.h                                                  \
           rational.h                                                    \
           ripemd.h                                                      \
           samplefmt.h                                                   \
           sha.h                                                         \
           sha512.h                                                      \
+          stereo3d.h                                                    \
+          threadmessage.h                                               \
           time.h                                                        \
           timecode.h                                                    \
           timestamp.h                                                   \
@@ -62,7 +69,8 @@ ARCH_HEADERS = bswap.h                                                  \
                intreadwrite.h                                           \
                timer.h                                                  \
 
-BUILT_HEADERS = avconfig.h
+BUILT_HEADERS = avconfig.h                                              \
+                ffversion.h
 
 OBJS = adler32.o                                                        \
        aes.o                                                            \
@@ -77,12 +85,15 @@ OBJS = adler32.o                                                        \
        cpu.o                                                            \
        crc.o                                                            \
        des.o                                                            \
+       display.o                                                        \
+       downmix_info.o                                                   \
        error.o                                                          \
        eval.o                                                           \
        fifo.o                                                           \
        file.o                                                           \
        file_open.o                                                      \
        float_dsp.o                                                      \
+       fixed_dsp.o                                                      \
        frame.o                                                          \
        hash.o                                                           \
        hmac.o                                                           \
@@ -90,7 +101,8 @@ OBJS = adler32.o                                                        \
        intfloat_readwrite.o                                             \
        intmath.o                                                        \
        lfg.o                                                            \
-       lls.o                                                            \
+       lls1.o                                                           \
+       lls2.o                                                           \
        log.o                                                            \
        log2_tab.o                                                       \
        mathematics.o                                                    \
@@ -108,6 +120,8 @@ OBJS = adler32.o                                                        \
        samplefmt.o                                                      \
        sha.o                                                            \
        sha512.o                                                         \
+       stereo3d.o                                                       \
+       threadmessage.o                                                  \
        time.o                                                           \
        timecode.o                                                       \
        tree.o                                                           \
@@ -119,6 +133,9 @@ OBJS-$(CONFIG_LZO)                      += lzo.o
 OBJS-$(CONFIG_OPENCL)                   += opencl.o opencl_internal.o
 
 OBJS += $(COMPAT_OBJS:%=../compat/%)
+
+# Windows resource file
+SLIBOBJS-$(HAVE_GNU_WINDRES)            += avutilres.o
 
 SKIPHEADERS          = old_pix_fmts.h
 
@@ -141,20 +158,25 @@ TESTPROGS = adler32                                                     \
             eval                                                        \
             file                                                        \
             fifo                                                        \
+            float_dsp                                                   \
             hmac                                                        \
             lfg                                                         \
-            lls                                                         \
+            lls1                                                        \
+            lls2                                                        \
+            log                                                         \
             md5                                                         \
             murmur3                                                     \
             opt                                                         \
             pca                                                         \
             parseutils                                                  \
+            pixdesc                                                     \
             random_seed                                                 \
             rational                                                    \
             ripemd                                                      \
             sha                                                         \
             sha512                                                      \
             tree                                                        \
+            utf8                                                        \
             xtea                                                        \
 
 TESTPROGS-$(HAVE_LZO1X_999_COMPRESS) += lzo
